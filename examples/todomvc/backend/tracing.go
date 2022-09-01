@@ -1,37 +1,36 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"io"
 
-	opentracing "github.com/opentracing/opentracing-go"
-	jaeger "github.com/uber/jaeger-client-go"
-	"github.com/uber/jaeger-client-go/transport/zipkin"
-	zk "github.com/uber/jaeger-client-go/zipkin"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// NewTracer creates a new global tracer. It must be closed on service exit
+// NewTracer creates a new TracerProvider. It must be closed on service exit
 // using the returned io.Closer.
-func NewTracer(serviceName, zipkinURL string) (io.Closer, error) {
-	// Send the tracing in Zipkin format (even if we are using Jaeger as backend).
-	transport, err := zipkin.NewHTTPTransport("http://" + zipkinURL + ":9411/api/v1/spans")
+func NewTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
+	var bsp sdktrace.SpanProcessor
+	exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
 	if err != nil {
-		return nil, fmt.Errorf("could not init Jaeger Zipkin HTTP transport: %w", err)
+		panic(fmt.Sprintf("failed to initialise stdouttrace exporter %v\n", err))
+	}
+	bsp = sdktrace.NewBatchSpanProcessor(exp)
+
+	resources, err := resource.New(ctx,
+		resource.WithFromEnv(),
+		resource.WithContainer(),
+		resource.WithTelemetrySDK(),
+		resource.WithHost(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create resource")
 	}
 
-	// Zipkin shares span ID between client and server spans; it must be enabled via the following option.
-	zipkinPropagator := zk.NewZipkinB3HTTPHeaderPropagator()
-
-	tracer, closer := jaeger.NewTracer(
-		serviceName,
-		jaeger.NewConstSampler(true), // Trace everything for now.
-		jaeger.NewRemoteReporter(transport),
-		jaeger.TracerOptions.Injector(opentracing.HTTPHeaders, zipkinPropagator),
-		jaeger.TracerOptions.Extractor(opentracing.HTTPHeaders, zipkinPropagator),
-		jaeger.TracerOptions.ZipkinSharedRPCSpan(true),
-		jaeger.TracerOptions.Gen128Bit(true),
-	)
-	opentracing.SetGlobalTracer(tracer)
-
-	return closer, nil
+	return sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(bsp),
+		sdktrace.WithResource(resources),
+	), nil
 }

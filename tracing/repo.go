@@ -18,11 +18,11 @@ import (
 	"context"
 	"errors"
 
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
-
 	eh "github.com/looplab/eventhorizon"
 	"github.com/looplab/eventhorizon/uuid"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Repo is a ReadWriteRepo that adds tracing.
@@ -58,63 +58,65 @@ func IntoRepo(ctx context.Context, repo eh.ReadRepo) *Repo {
 
 // Find implements the Find method of the eventhorizon.ReadModel interface.
 func (r *Repo) Find(ctx context.Context, id uuid.UUID) (eh.Entity, error) {
-	sp, ctx := opentracing.StartSpanFromContext(ctx, "Repo.Find")
+	_, span := otel.Tracer("").Start(ctx, "Repo.Find")
+	defer span.End()
 
 	entity, err := r.ReadWriteRepo.Find(ctx, id)
 
-	sp.SetTag("eh.aggregate_id", id)
+	span.SetAttributes(
+		attribute.String("eh.aggregate_id", id.String()),
+	)
 
 	if err != nil && !errors.Is(err, eh.ErrEntityNotFound) {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
-
-	sp.Finish()
 
 	return entity, err
 }
 
 // FindAll implements the FindAll method of the eventhorizon.ReadRepo interface.
 func (r *Repo) FindAll(ctx context.Context) ([]eh.Entity, error) {
-	sp, ctx := opentracing.StartSpanFromContext(ctx, "Repo.FindAll")
+	_, span := otel.Tracer("").Start(ctx, "Repo.FindAll")
+	defer span.End()
 
 	entities, err := r.ReadWriteRepo.FindAll(ctx)
 	if err != nil {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
-
-	sp.Finish()
 
 	return entities, err
 }
 
 // Save implements the Save method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Save(ctx context.Context, entity eh.Entity) error {
-	sp, ctx := opentracing.StartSpanFromContext(ctx, "Repo.Save")
+	_, span := otel.Tracer("").Start(ctx, "Repo.Save")
+	defer span.End()
 
 	err := r.ReadWriteRepo.Save(ctx, entity)
 	if err != nil {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
 
-	sp.SetTag("eh.aggregate_id", entity.EntityID())
-
-	sp.Finish()
+	span.SetAttributes(
+		attribute.String("eh.aggregate_id", entity.EntityID().String()),
+	)
 
 	return err
 }
 
 // Remove implements the Remove method of the eventhorizon.WriteRepo interface.
 func (r *Repo) Remove(ctx context.Context, id uuid.UUID) error {
-	sp, ctx := opentracing.StartSpanFromContext(ctx, "Repo.Remove")
+	_, span := otel.Tracer("").Start(ctx, "Repo.Remove")
+	defer span.End()
 
 	err := r.ReadWriteRepo.Remove(ctx, id)
 	if err != nil {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
 
-	sp.SetTag("eh.aggregate_id", id)
-
-	sp.Finish()
+	span.SetAttributes(
+		attribute.String("eh.aggregate_id", id.String()),
+	)
 
 	return err
 }

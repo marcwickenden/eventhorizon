@@ -19,8 +19,9 @@ import (
 	"fmt"
 
 	eh "github.com/looplab/eventhorizon"
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // NewEventHandlerMiddleware returns an event handler middleware that adds tracing spans.
@@ -37,19 +38,20 @@ type eventHandler struct {
 // HandleEvent implements the HandleEvent method of the EventHandler.
 func (h *eventHandler) HandleEvent(ctx context.Context, event eh.Event) error {
 	opName := fmt.Sprintf("%s.Event(%s)", h.HandlerType(), event.EventType())
-	sp, ctx := opentracing.StartSpanFromContext(ctx, opName)
+	_, span := otel.Tracer("").Start(ctx, opName)
+	defer span.End()
 
 	err := h.EventHandler.HandleEvent(ctx, event)
 	if err != nil {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
 
-	sp.SetTag("eh.event_type", event.EventType())
-	sp.SetTag("eh.aggregate_type", event.AggregateType())
-	sp.SetTag("eh.aggregate_id", event.AggregateID())
-	sp.SetTag("eh.version", event.Version())
-
-	sp.Finish()
+	span.SetAttributes(
+		attribute.String("eh.event_type", event.EventType().String()),
+		attribute.String("eh.aggregate_type", event.AggregateType().String()),
+		attribute.String("eh.aggregate_id", event.AggregateID().String()),
+		attribute.Int("eh.version", event.Version()),
+	)
 
 	return err
 }

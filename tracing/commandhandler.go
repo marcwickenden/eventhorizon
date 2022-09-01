@@ -19,8 +19,9 @@ import (
 	"fmt"
 
 	eh "github.com/looplab/eventhorizon"
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // NewCommandHandlerMiddleware returns a new command handler middleware that adds tracing spans.
@@ -28,17 +29,19 @@ func NewCommandHandlerMiddleware() eh.CommandHandlerMiddleware {
 	return eh.CommandHandlerMiddleware(func(h eh.CommandHandler) eh.CommandHandler {
 		return eh.CommandHandlerFunc(func(ctx context.Context, cmd eh.Command) error {
 			opName := fmt.Sprintf("Command(%s)", cmd.CommandType())
-			sp, ctx := opentracing.StartSpanFromContext(ctx, opName)
+			_, span := otel.Tracer("").Start(ctx, opName)
+			defer span.End()
 
 			err := h.HandleCommand(ctx, cmd)
 
-			sp.SetTag("eh.command_type", cmd.CommandType())
-			sp.SetTag("eh.aggregate_type", cmd.AggregateType())
-			sp.SetTag("eh.aggregate_id", cmd.AggregateID())
+			span.SetAttributes(
+				attribute.String("eh.command_type", cmd.CommandType().String()),
+				attribute.String("eh.aggregate_type", cmd.AggregateType().String()),
+				attribute.String("eh.aggregate_id", cmd.AggregateID().String()),
+			)
 			if err != nil {
-				ext.LogError(sp, err)
+				span.RecordError(err)
 			}
-			sp.Finish()
 
 			return err
 		})

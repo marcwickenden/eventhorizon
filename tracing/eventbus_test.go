@@ -23,7 +23,7 @@ import (
 )
 
 func init() {
-	RegisterContext()
+	// RegisterContext()
 }
 
 // NOTE: Not named "Integration" to enable running with the unit tests.

@@ -37,6 +37,8 @@ import (
 
 	"github.com/looplab/eventhorizon/examples/todomvc/backend/domains/todo"
 	"github.com/looplab/eventhorizon/examples/todomvc/backend/handler"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 func main() {
@@ -56,12 +58,6 @@ func main() {
 		redisAddr = "localhost:6379"
 	}
 
-	// Connect to localhost if not running inside docker
-	tracingURL := os.Getenv("TRACING_URL")
-	if tracingURL == "" {
-		tracingURL = "localhost"
-	}
-
 	// Get a random DB name.
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
@@ -72,12 +68,24 @@ func main() {
 
 	log.Println("using DB:", db)
 
-	traceCloser, err := NewTracer(db, tracingURL)
+	ctx := context.Background()
+	tp, err := NewTracer(ctx)
 	if err != nil {
 		log.Fatal("could not create tracer: ", err)
 	}
 
-	tracing.RegisterContext()
+	// set global propagator to tracecontext (the default is no-op).
+	otel.SetTextMapPropagator(
+		propagation.NewCompositeTextMapPropagator(
+			propagation.Baggage{},
+			propagation.TraceContext{},
+		),
+	)
+	otel.SetTracerProvider(tp)
+
+	tracer := tp.Tracer("")
+	ctx, span := tracer.Start(ctx, "")
+	defer span.End()
 
 	// Create the outbox that will project and publish events.
 	var outbox eh.Outbox
@@ -126,8 +134,6 @@ func main() {
 	if err := todo.SetupDomain(commandBus, eventStore, outbox, todoRepo); err != nil {
 		log.Fatal("could not setup Todo domain: ", err)
 	}
-
-	ctx := context.Background()
 
 	// Create the event bus that distributes events.
 	var eventBus eh.EventBus
@@ -226,7 +232,7 @@ func main() {
 		log.Print("could not close event store: ", err)
 	}
 
-	if err := traceCloser.Close(); err != nil {
+	if err := tp.Shutdown(ctx); err != nil {
 		log.Print("could not close tracer: ", err)
 	}
 

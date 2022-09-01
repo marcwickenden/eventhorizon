@@ -17,11 +17,11 @@ package tracing
 import (
 	"context"
 
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
-
 	eh "github.com/looplab/eventhorizon"
 	"github.com/looplab/eventhorizon/uuid"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // EventStore is an eventhorizon.EventStore that adds tracing with Open Tracing.
@@ -42,44 +42,46 @@ func NewEventStore(eventStore eh.EventStore) *EventStore {
 
 // Save implements the Save method of the eventhorizon.EventStore interface.
 func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersion int) error {
-	sp, ctx := opentracing.StartSpanFromContext(ctx, "EventStore.Save")
+	_, span := otel.Tracer("").Start(ctx, "EventStore.Save")
+	defer span.End()
 
 	err := s.EventStore.Save(ctx, events, originalVersion)
 	if err != nil {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
 
 	// Use the first event for tracing metadata.
 	if len(events) > 0 {
-		sp.SetTag("eh.event_type", events[0].EventType())
-		sp.SetTag("eh.aggregate_type", events[0].AggregateType())
-		sp.SetTag("eh.aggregate_id", events[0].AggregateID())
-		sp.SetTag("eh.version", events[0].Version())
+		span.SetAttributes(
+			attribute.String("eh.event_type", events[0].EventType().String()),
+			attribute.String("eh.aggregate_type", events[0].AggregateType().String()),
+			attribute.String("eh.aggregate_id", events[0].AggregateID().String()),
+			attribute.Int("eh.version", events[0].Version()),
+		)
 	}
-
-	sp.Finish()
 
 	return err
 }
 
 // Load implements the Load method of the eventhorizon.EventStore interface.
 func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error) {
-	sp, ctx := opentracing.StartSpanFromContext(ctx, "EventStore.Load")
+	_, span := otel.Tracer("").Start(ctx, "EventStore.Load")
+	defer span.End()
 
 	events, err := s.EventStore.Load(ctx, id)
 	if err != nil {
-		ext.LogError(sp, err)
+		span.RecordError(err)
 	}
 
 	// Use the first event for tracing metadata.
 	if len(events) > 0 {
-		sp.SetTag("eh.event_type", events[0].EventType())
-		sp.SetTag("eh.aggregate_type", events[0].AggregateType())
-		sp.SetTag("eh.aggregate_id", events[0].AggregateID())
-		sp.SetTag("eh.version", events[0].Version())
+		span.SetAttributes(
+			attribute.String("eh.event_type", events[0].EventType().String()),
+			attribute.String("eh.aggregate_type", events[0].AggregateType().String()),
+			attribute.String("eh.aggregate_id", events[0].AggregateID().String()),
+			attribute.Int("eh.version", events[0].Version()),
+		)
 	}
-
-	sp.Finish()
 
 	return events, err
 }
