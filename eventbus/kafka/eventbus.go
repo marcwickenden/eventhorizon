@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +33,7 @@ import (
 // to all matching registered handlers, in order of registration.
 type EventBus struct {
 	// TODO: Support multiple brokers.
-	addr         string
+	addresses    []string
 	appID        string
 	topic        string
 	startOffset  int64
@@ -48,11 +49,13 @@ type EventBus struct {
 }
 
 // NewEventBus creates an EventBus, with optional GCP connection settings.
-func NewEventBus(addr, appID string, options ...Option) (*EventBus, error) {
+func NewEventBus(addressList, appID string, options ...Option) (*EventBus, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	addrSplit := strings.Split(addressList, ",")
+
 	b := &EventBus{
-		addr:        addr,
+		addresses:   addrSplit,
 		appID:       appID,
 		topic:       appID + "_events",
 		startOffset: kafka.LastOffset, // Default: Don't read old messages.
@@ -76,7 +79,7 @@ func NewEventBus(addr, appID string, options ...Option) (*EventBus, error) {
 
 	// Get or create the topic.
 	b.client = &kafka.Client{
-		Addr: kafka.TCP(addr),
+		Addr: kafka.TCP(addrSplit...),
 	}
 
 	var resp *kafka.CreateTopicsResponse
@@ -114,7 +117,7 @@ func NewEventBus(addr, appID string, options ...Option) (*EventBus, error) {
 	}
 
 	b.writer = &kafka.Writer{
-		Addr:         kafka.TCP(addr),
+		Addr:         kafka.TCP(addrSplit...),
 		Topic:        b.topic,
 		BatchSize:    1,                // Write every event to the bus without delay.
 		RequiredAcks: kafka.RequireOne, // Stronger consistency.
@@ -216,8 +219,9 @@ func (b *EventBus) AddHandler(ctx context.Context, m eh.EventMatcher, h eh.Event
 
 	// Get or create the subscription.
 	groupID := b.appID + "_" + h.HandlerType().String()
+
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:               []string{b.addr},
+		Brokers:               b.addresses,
 		Topic:                 b.topic,
 		GroupID:               groupID,     // Send messages to only one subscriber per group.
 		MaxWait:               time.Second, // Allow to exit readloop in max 1s.
