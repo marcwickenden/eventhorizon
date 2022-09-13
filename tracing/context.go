@@ -14,6 +14,18 @@
 
 package tracing
 
+import (
+	"context"
+	"encoding/json"
+	"log"
+
+	eh "github.com/looplab/eventhorizon"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+)
+
 // The string keys to marshal the context.
 const (
 	tracingSpanKeyStr = "eh_tracing_span"
@@ -29,50 +41,42 @@ const (
 // event bus or outbox, which currently is the best Elastic APM can support.
 //
 // See: https://github.com/elastic/apm/issues/122
-// func RegisterContext() {
-// 	eh.RegisterContextMarshaler(func(ctx context.Context, vals map[string]interface{}) {
-// 		if span := opentracing.SpanFromContext(ctx); span != nil {
-// 			tracer := opentracing.GlobalTracer()
+//
+// OTEL version from @jcampii
+func RegisterContext() {
+	eh.RegisterContextMarshaler(func(ctx context.Context, vals map[string]interface{}) {
+		if span := trace.SpanFromContext(ctx); span != nil {
 
-// 			carrier := opentracing.TextMapCarrier{}
-// 			if err := tracer.Inject(span.Context(), opentracing.TextMap, &carrier); err != nil {
-// 				log.Printf("eventhorizon: could not inject tracing span: %s", err)
+			propgator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+			carrier := propagation.MapCarrier{}
+			propgator.Inject(ctx, &carrier)
 
-// 				return
-// 			}
+			js, err := json.Marshal(carrier)
+			if err != nil {
+				log.Printf("eventhorizon: could not marshal tracing span: %s", err)
 
-// 			js, err := json.Marshal(carrier)
-// 			if err != nil {
-// 				log.Printf("eventhorizon: could not marshal tracing span: %s", err)
+				return
+			}
 
-// 				return
-// 			}
+			vals[tracingSpanKeyStr] = string(js)
+		}
+	})
+	eh.RegisterContextUnmarshaler(func(ctx context.Context, vals map[string]interface{}) context.Context {
+		if js, ok := vals[tracingSpanKeyStr].(string); ok {
+			propgator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+			carrier := propagation.MapCarrier{}
+			if err := json.Unmarshal([]byte(js), &carrier); err != nil {
+				log.Printf("eventhorizon: could not unmarshal tracing span: %s", err)
 
-// 			vals[tracingSpanKeyStr] = string(js)
-// 		}
-// 	})
-// 	eh.RegisterContextUnmarshaler(func(ctx context.Context, vals map[string]interface{}) context.Context {
-// 		if js, ok := vals[tracingSpanKeyStr].(string); ok {
-// 			tracer := opentracing.GlobalTracer()
+				return ctx
+			}
 
-// 			carrier := opentracing.TextMapCarrier{}
-// 			if err := json.Unmarshal([]byte(js), &carrier); err != nil {
-// 				log.Printf("eventhorizon: could not unmarshal tracing span: %s", err)
+			parentCtx := propgator.Extract(ctx, carrier)
+			spanCtx := trace.SpanContextFromContext(parentCtx)
+			ctx = trace.ContextWithRemoteSpanContext(ctx, spanCtx)
+			otel.Tracer("eventbus").Start(ctx, "eventbus", trace.WithSpanKind(trace.SpanKindServer))
+		}
 
-// 				return ctx
-// 			}
-
-// 			parentSpanContext, err := tracer.Extract(opentracing.TextMap, carrier)
-// 			if err != nil && err != opentracing.ErrSpanContextNotFound {
-// 				log.Printf("eventhorizon: could not extract tracing span: %s", err)
-
-// 				return ctx
-// 			}
-
-// 			span := tracer.StartSpan("eventbus", ext.RPCServerOption(parentSpanContext))
-// 			ctx = opentracing.ContextWithSpan(ctx, span)
-// 		}
-
-// 		return ctx
-// 	})
-// }
+		return ctx
+	})
+}
