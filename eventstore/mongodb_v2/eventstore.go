@@ -15,12 +15,19 @@
 package mongodb_v2
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
+	"github.com/looplab/eventhorizon/mongoutils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	mongoOptions "go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -35,15 +42,16 @@ import (
 
 // EventStore is an eventhorizon.EventStore for MongoDB, using one collection
 // for all events and another to keep track of all aggregates/streams. It also
-// keep tracks of the global position of events, stored as metadata.
+// keeps track of the global position of events, stored as metadata.
 type EventStore struct {
-	client                *mongo.Client
-	clientOwnership       clientOwnership
-	db                    *mongo.Database
-	events                *mongo.Collection
-	streams               *mongo.Collection
-	eventHandlerAfterSave eh.EventHandler
-	eventHandlerInTX      eh.EventHandler
+	client                  *mongo.Client
+	clientOwnership         clientOwnership
+	events                  *mongo.Collection
+	streams                 *mongo.Collection
+	snapshots               *mongo.Collection
+	eventHandlerAfterSave   eh.EventHandler
+	eventHandlerInTX        eh.EventHandler
+	skipNonRegisteredEvents bool
 }
 
 type clientOwnership int
@@ -82,9 +90,9 @@ func newEventStoreWithClient(client *mongo.Client, clientOwnership clientOwnersh
 	s := &EventStore{
 		client:          client,
 		clientOwnership: clientOwnership,
-		db:              db,
 		events:          db.Collection("events"),
 		streams:         db.Collection("streams"),
+		snapshots:       db.Collection("snapshots"),
 	}
 
 	for _, option := range options {
@@ -103,6 +111,24 @@ func newEventStoreWithClient(client *mongo.Client, clientOwnership clientOwnersh
 		Keys: bson.M{"aggregate_id": 1},
 	}); err != nil {
 		return nil, fmt.Errorf("could not ensure events index: %w", err)
+	}
+
+	if _, err := s.events.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.M{"version": 1},
+	}); err != nil {
+		return nil, fmt.Errorf("could not ensure events index: %w", err)
+	}
+
+	if _, err := s.snapshots.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.M{"aggregate_id": 1},
+	}); err != nil {
+		return nil, fmt.Errorf("could not ensure snapshot aggregate_id index: %w", err)
+	}
+
+	if _, err := s.snapshots.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.M{"version": 1},
+	}); err != nil {
+		return nil, fmt.Errorf("could not ensure snapshot version index: %w", err)
 	}
 
 	// Make sure the $all stream exists.
@@ -167,16 +193,31 @@ func WithEventHandlerInTX(h eh.EventHandler) Option {
 // Will return an error if provided parameters are equal.
 func WithCollectionNames(eventsColl, streamsColl string) Option {
 	return func(s *EventStore) error {
-		if eventsColl == streamsColl {
+		if err := mongoutils.CheckCollectionName(eventsColl); err != nil {
+			return fmt.Errorf("events collection: %w", err)
+		} else if err := mongoutils.CheckCollectionName(streamsColl); err != nil {
+			return fmt.Errorf("streams collection: %w", err)
+		} else if eventsColl == streamsColl {
 			return fmt.Errorf("custom collection names are equal")
 		}
 
-		if eventsColl == "" || streamsColl == "" {
-			return fmt.Errorf("missing collection name")
+		db := s.events.Database()
+		s.events = db.Collection(eventsColl)
+		s.streams = db.Collection(streamsColl)
+
+		return nil
+	}
+}
+
+// WithSnapshotCollectionName uses different collections from the default "snapshots" collections.
+func WithSnapshotCollectionName(snapshotColl string) Option {
+	return func(s *EventStore) error {
+		if err := mongoutils.CheckCollectionName(snapshotColl); err != nil {
+			return fmt.Errorf("snapshot collection: %w", err)
 		}
 
-		s.events = s.db.Collection(eventsColl)
-		s.streams = s.db.Collection(streamsColl)
+		db := s.events.Database()
+		s.snapshots = db.Collection(snapshotColl)
 
 		return nil
 	}
@@ -398,6 +439,24 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 		}
 	}
 
+	return s.loadFromCursor(ctx, id, cursor)
+}
+
+// LoadFrom implements LoadFrom method of the eventhorizon.SnapshotStore interface.
+func (s *EventStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) ([]eh.Event, error) {
+	cursor, err := s.events.Find(ctx, bson.M{"aggregate_id": id, "version": bson.M{"$gte": version}})
+	if err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not find event: %w", err),
+			Op:          eh.EventStoreOpLoad,
+			AggregateID: id,
+		}
+	}
+
+	return s.loadFromCursor(ctx, id, cursor)
+}
+
+func (s *EventStore) loadFromCursor(ctx context.Context, id uuid.UUID, cursor *mongo.Cursor) ([]eh.Event, error) {
 	var events []eh.Event
 
 	for cursor.Next(ctx) {
@@ -464,6 +523,109 @@ func (s *EventStore) Load(ctx context.Context, id uuid.UUID) ([]eh.Event, error)
 	return events, nil
 }
 
+func (s *EventStore) LoadSnapshot(ctx context.Context, id uuid.UUID) (*eh.Snapshot, error) {
+	result := s.snapshots.FindOne(ctx, bson.M{"aggregate_id": id}, options.FindOne().SetSort(bson.M{"version": -1}))
+	if err := result.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	var (
+		record   = new(SnapshotRecord)
+		snapshot = new(eh.Snapshot)
+		err      error
+	)
+
+	if err := result.Decode(record); err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not decode snapshot: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	if snapshot.State, err = eh.CreateSnapshotData(record.AggregateID, record.AggregateType); err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not decode snapshot: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	if err = record.decompress(); err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not decompress snapshot: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	if err = json.Unmarshal(record.RawData, snapshot); err != nil {
+		return nil, &eh.EventStoreError{
+			Err:         fmt.Errorf("could not decode snapshot: %w", err),
+			Op:          eh.EventStoreOpLoadSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	return snapshot, nil
+}
+
+func (s *EventStore) SaveSnapshot(ctx context.Context, id uuid.UUID, snapshot eh.Snapshot) (err error) {
+	if snapshot.AggregateType == "" {
+		return &eh.EventStoreError{
+			Err:           fmt.Errorf("aggregate type is empty"),
+			Op:            eh.EventStoreOpSaveSnapshot,
+			AggregateID:   id,
+			AggregateType: snapshot.AggregateType,
+		}
+	}
+
+	if snapshot.State == nil {
+		return &eh.EventStoreError{
+			Err:           fmt.Errorf("snapshots state is nil"),
+			Op:            eh.EventStoreOpSaveSnapshot,
+			AggregateID:   id,
+			AggregateType: snapshot.AggregateType,
+		}
+	}
+
+	record := SnapshotRecord{
+		AggregateID:   id,
+		AggregateType: snapshot.AggregateType,
+		Timestamp:     time.Now(),
+		Version:       snapshot.Version,
+	}
+
+	if record.RawData, err = json.Marshal(snapshot); err != nil {
+		return
+	}
+
+	if err = record.compress(); err != nil {
+		return &eh.EventStoreError{
+			Err:         fmt.Errorf("could not compress snapshot: %w", err),
+			Op:          eh.EventStoreOpSaveSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	if _, err := s.snapshots.InsertOne(ctx,
+		record,
+		options.InsertOne(),
+	); err != nil {
+		return &eh.EventStoreError{
+			Err:         fmt.Errorf("could not save snapshot: %w", err),
+			Op:          eh.EventStoreOpSaveSnapshot,
+			AggregateID: id,
+		}
+	}
+
+	return nil
+}
+
 // Close implements the Close method of the eventhorizon.EventStore interface.
 func (s *EventStore) Close() error {
 	if s.clientOwnership == externalClient {
@@ -472,6 +634,48 @@ func (s *EventStore) Close() error {
 	}
 
 	return s.client.Disconnect(context.Background())
+}
+
+type SnapshotRecord struct {
+	AggregateID   uuid.UUID        `bson:"aggregate_id"`
+	RawData       []byte           `bson:"data"`
+	Timestamp     time.Time        `bson:"timestamp"`
+	Version       int              `bson:"version"`
+	AggregateType eh.AggregateType `bson:"aggregate_type"`
+}
+
+func (r *SnapshotRecord) decompress() error {
+	byteReader := bytes.NewReader(r.RawData)
+	reader, err := gzip.NewReader(byteReader)
+
+	if err != nil {
+		return err
+	}
+
+	r.RawData, err = io.ReadAll(reader)
+
+	return err
+}
+
+func (r *SnapshotRecord) compress() error {
+	var b bytes.Buffer
+	w := gzip.NewWriter(&b)
+
+	if _, err := w.Write(r.RawData); err != nil {
+		return err //nolint:wrapcheck
+	}
+
+	if err := w.Flush(); err != nil {
+		return err //nolint:wrapcheck
+	}
+
+	if err := w.Close(); err != nil {
+		return err //nolint:wrapcheck
+	}
+
+	r.RawData = b.Bytes()
+
+	return nil
 }
 
 // stream is a stream of events, often containing the events for an aggregate.
@@ -498,7 +702,7 @@ type evt struct {
 }
 
 // newEvt returns a new evt for an event.
-func newEvt(ctx context.Context, event eh.Event) (*evt, error) {
+func newEvt(_ context.Context, event eh.Event) (*evt, error) {
 	e := &evt{
 		EventType:     event.EventType(),
 		Timestamp:     event.Timestamp(),
