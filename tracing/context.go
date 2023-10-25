@@ -46,7 +46,6 @@ const (
 func RegisterContext() {
 	eh.RegisterContextMarshaler(func(ctx context.Context, vals map[string]interface{}) {
 		if span := trace.SpanFromContext(ctx); span != nil {
-
 			propgator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 			carrier := propagation.MapCarrier{}
 			propgator.Inject(ctx, &carrier)
