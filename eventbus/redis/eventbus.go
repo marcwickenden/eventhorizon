@@ -35,6 +35,7 @@ type EventBus struct {
 	appID        string
 	clientID     string
 	streamName   string
+	msgID        string
 	client       *redis.Client
 	clientOpts   *redis.Options
 	registered   map[eh.EventHandlerType]struct{}
@@ -54,6 +55,7 @@ func NewEventBus(addr, appID, clientID string, options ...Option) (*EventBus, er
 		appID:      appID,
 		clientID:   clientID,
 		streamName: appID + "_events",
+		msgID:      ">",
 		registered: map[eh.EventHandlerType]struct{}{},
 		errCh:      make(chan error, 100),
 		cctx:       ctx,
@@ -208,7 +210,7 @@ func (b *EventBus) handle(m eh.EventMatcher, h eh.EventHandler, groupName string
 		streams, err := b.client.XReadGroup(b.cctx, &redis.XReadGroupArgs{
 			Group:    groupName,
 			Consumer: groupName + "_" + b.clientID,
-			Streams:  []string{b.streamName, ">"},
+			Streams:  []string{b.streamName, b.msgID},
 		}).Result()
 		if errors.Is(err, context.Canceled) {
 			break
