@@ -102,6 +102,15 @@ func WithCodec(codec eh.EventCodec) Option {
 	}
 }
 
+// WithMsgID uses the specified message ID for the consumer group.
+func WithMsgID(msgID string) Option {
+	return func(b *EventBus) error {
+		b.msgID = msgID
+
+		return nil
+	}
+}
+
 // WithRedisOptions uses the Redis options for the underlying client, instead of the defaults.
 func WithRedisOptions(opts *redis.Options) Option {
 	return func(b *EventBus) error {
