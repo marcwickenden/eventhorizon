@@ -70,7 +70,7 @@ func (c *EventCodec) UnmarshalEvent(ctx context.Context, b []byte) (eh.Event, co
 	if len(e.RawData) > 0 {
 		var err error
 		if e.data, err = eh.CreateEventData(e.EventType); err != nil {
-			return nil, nil, fmt.Errorf("could not create event data: %w", err)
+			return nil, nil, fmt.Errorf("could not create event data MARC: %w", err)
 		}
 
 		if err := bson.Unmarshal(e.RawData, e.data); err != nil {

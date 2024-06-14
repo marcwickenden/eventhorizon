@@ -15,7 +15,6 @@
 package eventhorizon
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -26,8 +25,8 @@ import (
 // Event is a domain event describing a change that has happened to an aggregate.
 //
 // An event struct and type name should:
-//   1) Be in past tense (CustomerMoved)
-//   2) Contain the intent (CustomerMoved vs CustomerAddressCorrected).
+//  1. Be in past tense (CustomerMoved)
+//  2. Contain the intent (CustomerMoved vs CustomerAddressCorrected).
 //
 // The event should contain all the data needed when applying/handling it.
 type Event interface {
@@ -207,13 +206,27 @@ func (e event) String() string {
 }
 
 // ErrEventDataNotRegistered is when no event data factory was registered.
-var ErrEventDataNotRegistered = errors.New("event data not registered")
+type ErrEventDataNotRegistered struct {
+	EventType EventType
+	Factories map[EventType]func() EventData
+}
+
+// Error implements the Error method of the errors.Error interface.
+func (e ErrEventDataNotRegistered) Error() string {
+	availableFactories := make([]string, 0, len(e.Factories))
+	for k := range e.Factories {
+		availableFactories = append(availableFactories, k.String())
+	}
+
+	return fmt.Sprintf("eventhorizon: event data not registered for %q / factories: %q", e.EventType, availableFactories)
+}
 
 // RegisterEventData registers an event data factory for a type. The factory is
 // used to create concrete event data structs when loading from the database.
 //
 // An example would be:
-//     RegisterEventData(MyEventType, func() Event { return &MyEventData{} })
+//
+//	RegisterEventData(MyEventType, func() Event { return &MyEventData{} })
 func RegisterEventData(eventType EventType, factory func() EventData) {
 	if eventType == EventType("") {
 		panic("eventhorizon: attempt to register empty event type")
@@ -259,7 +272,10 @@ func CreateEventData(eventType EventType) (EventData, error) {
 		return factory(), nil
 	}
 
-	return nil, ErrEventDataNotRegistered
+	return nil, ErrEventDataNotRegistered{
+		EventType: eventType,
+		Factories: eventDataFactories,
+	}
 }
 
 var eventDataFactories = make(map[EventType]func() EventData)
